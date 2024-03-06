@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.index.sai.disk.v2.hnsw;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -25,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntUnaryOperator;
 
 import com.google.common.collect.HashBiMap;
@@ -47,6 +49,7 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -75,6 +78,53 @@ public class OnDiskOrdinalsMapTest
         assertFalse(ordinalsMatchRowIds);
     }
 
+    @Test
+    public void testForEachRowidMatching() throws Exception
+    {
+        testForEach(HashBiMap.create());
+    }
+
+    @Test
+    public void testForEachFileReading() throws Exception
+    {
+        testForEach(null);
+    }
+
+    private void testForEach(HashBiMap<Integer, Integer> ordinalsMap) throws Exception
+    {
+        File tempFile = temp("testfile");
+
+        var deletedOrdinals = new HashSet<Integer>();
+        RamAwareVectorValues vectorValues = generateVectors(10);
+
+        var postingsMap = generatePostingsMap(vectorValues);
+
+        for (var p: postingsMap.entrySet()) {
+            p.getValue().computeRowIds(x -> x);
+        }
+
+        PostingsMetadata postingsMd = writePostings(ordinalsMap, tempFile, vectorValues, postingsMap, deletedOrdinals);
+
+        try (FileHandle.Builder builder = new FileHandle.Builder(new ChannelProxy(tempFile)).compressed(false);
+             FileHandle fileHandle = builder.complete())
+        {
+            OnDiskOrdinalsMap odom = new OnDiskOrdinalsMap(fileHandle, postingsMd.postingsOffset, postingsMd.postingsLength);
+
+            try (var ordinalsView = odom.getOrdinalsView())
+            {
+                final AtomicInteger count = new AtomicInteger(0);
+                ordinalsView.forEachOrdinalInRange(-100, Integer.MAX_VALUE, (rowId, ordinal) -> {
+                    assertTrue(ordinal >= 0);
+                    assertTrue(ordinal < vectorValues.size());
+                    count.incrementAndGet();
+                });
+                assertEquals(vectorValues.size(), count.get());
+            }
+
+            odom.close();
+        }
+    }
+
     private boolean createOdomAndGetRowIdsMatchOrdinals(HashBiMap<Integer, Integer> ordinalsMap) throws Exception
     {
         File tempFile = temp("testfile");
@@ -88,6 +138,20 @@ public class OnDiskOrdinalsMapTest
             p.getValue().computeRowIds(x -> x);
         }
 
+        PostingsMetadata postingsMd = writePostings(ordinalsMap, tempFile, vectorValues, postingsMap, deletedOrdinals);
+
+        try (FileHandle.Builder builder = new FileHandle.Builder(new ChannelProxy(tempFile)).compressed(false);
+             FileHandle fileHandle = builder.complete())
+        {
+            OnDiskOrdinalsMap odom = new OnDiskOrdinalsMap(fileHandle, postingsMd.postingsOffset, postingsMd.postingsLength);
+            boolean rowIdsMatchOrdinals = (boolean) FieldUtils.readField(odom, "rowIdsMatchOrdinals", true);
+            odom.close();
+            return rowIdsMatchOrdinals;
+        }
+    }
+
+    private static PostingsMetadata writePostings(HashBiMap<Integer, Integer> ordinalsMap, File tempFile, RamAwareVectorValues vectorValues, Map<float[], VectorPostings<Integer>> postingsMap, HashSet<Integer> deletedOrdinals) throws IOException
+    {
         SequentialWriter writer = new SequentialWriter(tempFile,
                                                        SequentialWriterOption.newBuilder().finishOnClose(true).build());
 
@@ -101,14 +165,19 @@ public class OnDiskOrdinalsMapTest
         long postingsLength = postingsPosition - postingsOffset;
 
         writer.close();
+        PostingsMetadata postingsMd = new PostingsMetadata(postingsOffset, postingsLength);
+        return postingsMd;
+    }
 
-        try (FileHandle.Builder builder = new FileHandle.Builder(new ChannelProxy(tempFile)).compressed(false);
-             FileHandle fileHandle = builder.complete())
+    private static class PostingsMetadata
+    {
+        public final long postingsOffset;
+        public final long postingsLength;
+
+        public PostingsMetadata(long postingsOffset, long postingsLength)
         {
-            OnDiskOrdinalsMap odom = new OnDiskOrdinalsMap(fileHandle, postingsOffset, postingsLength);
-            boolean rowIdsMatchOrdinals = (boolean) FieldUtils.readField(odom, "rowIdsMatchOrdinals", true);
-            odom.close();
-            return rowIdsMatchOrdinals;
+            this.postingsOffset = postingsOffset;
+            this.postingsLength = postingsLength;
         }
     }
 
