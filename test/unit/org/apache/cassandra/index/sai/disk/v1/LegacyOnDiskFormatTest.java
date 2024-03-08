@@ -42,6 +42,7 @@ import org.apache.cassandra.index.sai.disk.PrimaryKeyMap;
 import org.apache.cassandra.index.sai.disk.QueryEventListeners;
 import org.apache.cassandra.index.sai.disk.format.IndexComponent;
 import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
+import org.apache.cassandra.index.sai.disk.format.Version;
 import org.apache.cassandra.index.sai.disk.v1.bitpack.NumericValuesMeta;
 import org.apache.cassandra.index.sai.disk.v1.kdtree.BKDReader;
 import org.apache.cassandra.index.sai.plan.Expression;
@@ -65,7 +66,6 @@ import static org.junit.Assert.assertTrue;
  * Note: The sstables and SAI indexes used in this test were written with DSE 6.8
  * in order to guarantee the correctness of the V1 on-disk format code.
  */
-@Ignore // FIXME broken due to little-endian upgrade to Lucene 9.5
 public class LegacyOnDiskFormatTest
 {
     private TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -102,6 +102,12 @@ public class LegacyOnDiskFormatTest
     public void teardown()
     {
         temporaryFolder.delete();
+    }
+
+    @Test
+    public void correctlyIdentifiesPerSSTableFileVersion()
+    {
+        assertEquals(Version.AA, indexDescriptor.getVersion());
     }
 
     @Test
